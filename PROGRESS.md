@@ -11,7 +11,7 @@ Overall % = weighted sum. Be honest; verified-working only counts.
 | 5 | Sync chain (upserts, dedup, retry)         | 20%    | 5%     | designed, not built; TWENTY_API_KEY now present in .env/n8n so unblocked |
 | 6 | Twenty automations (email + ARR)           | 10%    | 0%     | |
 | 7 | Demonstration (7 scenarios)                | 7%     | 0%     | |
-| 8 | Repo + README + submission                 | 8%     | 15%    | seed script + compose exist |
+| 8 | Repo + README + submission                 | 8%     | 55%    | scaffolding+docs done, see notes; export/final setup/submission still pending |
 
 ## Category 4 session notes (2026-07-20, integration-agent)
 
@@ -71,3 +71,70 @@ flipping order status (WordPress trying to send an order-email with no mail
 transport configured in the stack). Harmless for the webhook/sync pipeline itself,
 but flagging since it's shop-infra, not something I should silently "fix" outside
 my lane.
+
+## Category 8 session notes (2026-07-20, docs-agent)
+
+Stayed strictly in repo-scaffolding/docs lane: did not touch the n8n workflow,
+did not export workflow JSON (not stable yet — category 5 is 5%), did not read or
+modify any real secret value in `.env` (only extracted variable *names* via
+`grep -oE '^[A-Z_0-9]+='`, never values).
+
+**Done, verified:**
+1. `git init` (repo had no VCS yet) → default branch renamed to `main`.
+2. `.gitignore` — excludes `.env`/`.env.*` (with a `!.env.example` carve-out),
+   `*.pem`/`*.key`/SSH key patterns, `.claude/settings.local.json` (local
+   machine permission state, not secret but not portable/meaningful to share),
+   and defensive patterns for DB data / WP uploads in case anyone ever
+   bind-mounts those instead of the current named volumes. Verified with
+   `git check-ignore -v .env` → correctly matched.
+3. `.env.example` — built by cross-referencing the actual `docker-compose.yml`
+   + `docker-compose.override.yml` variable names (10 vars: DOMAIN_N8N,
+   DOMAIN_TWENTY, DOMAIN_WP, N8N_DB_PASSWORD, N8N_ENCRYPTION_KEY,
+   TWENTY_API_KEY, TWENTY_APP_SECRET, TWENTY_DB_PASSWORD, WC_WEBHOOK_SECRET,
+   WP_DB_PASSWORD) against the real `.env`'s key list — exact match, nothing
+   missing/extra. Placeholder values only, with generation hints
+   (`openssl rand -hex 32`) and comments explaining what each var is for.
+4. Postgres init scripts — `postgres-init/n8n-db/01-init.sql` and
+   `postgres-init/twenty-db/01-init.sql` (extensions only: pg_trgm,
+   uuid-ossp, btree_gin — explicitly NOT app schema, since n8n/Twenty own
+   their own migrations). Wired into `docker-compose.yml` via two small
+   additive volume-mount lines (`./postgres-init/<svc>:/docker-entrypoint-initdb.d:ro`)
+   on the `n8n-db` and `twenty-db` services only — did not touch any
+   n8n-workflow-related or Twenty-sync-related env vars in that file.
+   Validated with `docker compose config --quiet` (syntax-only render, zero
+   containers touched/restarted — the live stack was left running
+   undisturbed). Note for whoever stands this up fresh: these scripts only
+   run on an empty data volume per standard Postgres entrypoint behavior, so
+   they won't retroactively apply to the already-initialized volumes on the
+   current live server — documented in README §3.
+5. `README.md` — architecture diagram + compose topology, full data-flow
+   section (webhook gate marked stable/verified per category 4's notes above,
+   sync chain marked `[PENDING]` per category 5's actual state), Postgres
+   init script rationale, full CRM data model table with the *why* behind each
+   design choice (matches CLAUDE.md's already-decided model, not reinvented),
+   dedup + retry approach as a scenario table mapped directly to the
+   assignment's required test cases, honest limitations/assumptions section
+   (paid-add-ons-as-line-items simplification, sslip.io/no-domain tradeoff,
+   single-host/no-HA, WordPress mail transport gap found during category 4's
+   testing, Twenty schema built by hand not IaC, Order Line Item's
+   composite-not-single unique key). Setup (§6) and demo (§7) sections left
+   explicitly `[PENDING]` with what's blocking them (workflow export, category
+   5/6/7 completion) rather than pre-writing speculative content.
+6. `AI_TOOLS.md` — specific per-area breakdown (infra, shop data, n8n webhook
+   gate, Twenty data model, this doc) of what Claude Code did and how each was
+   *verified* (live container/DB checks, not "looked right in the editor"),
+   including the case-sensitivity webhook bug from category 4 as a concrete
+   example of AI output being caught wrong and corrected, not just accepted.
+7. Local git commit created (root commit `e594e46`, 18 files) — **not pushed
+   anywhere**, per instructions.
+
+**Explicitly NOT done yet (blocked on other categories):**
+- Exported n8n workflow JSON — waiting on category 5 (currently 5%) to reach a
+  finished, verified state before exporting, so the repo artifact reflects
+  working behavior.
+- README §6 (Setup) final exact commands and §7 (Demonstration scenarios) —
+  both depend on the workflow export existing and categories 6/7 being done.
+- Submission to nir@spines.com — not done, not requested yet.
+
+Category 8 is now blocked purely on categories 5/6/7 finishing; nothing else
+in this lane is pending on my end.
