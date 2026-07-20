@@ -1,0 +1,38 @@
+# --- Secrets: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_rsa
+*_rsa.pub
+*.crt
+id_ed25519*
+
+# --- Claude Code local machine state (not portable, not secret, just noise) ---
+.claude/settings.local.json
+
+# --- Docker / Postgres data (all services use named volumes, not bind mounts,
+# so nothing under the repo should ever contain live DB data — this is a
+# belt-and-suspenders guard in case that ever changes) ---
+**/pgdata/
+**/postgres-data/
+*_data/
+docker-volumes/
+
+# --- WordPress runtime (if ever bind-mounted instead of the named volume) ---
+wp-content/uploads/
+wp_data/
+
+# --- n8n exported credentials (workflow JSON without credentials is fine;
+# a raw credentials export is not) ---
+*credentials*.json
+
+# --- OS / editor noise ---
+.DS_Store
+*.swp
+*~
+
+# --- Scratch / tmp ---
+tmp/
+*.tmp

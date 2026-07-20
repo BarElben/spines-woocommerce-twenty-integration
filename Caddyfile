@@ -1,0 +1,11 @@
+{$DOMAIN_N8N} {
+    reverse_proxy n8n:5678
+}
+
+{$DOMAIN_TWENTY} {
+    reverse_proxy twenty-server:3000
+}
+
+{$DOMAIN_WP} {
+    reverse_proxy wordpress:80
+}

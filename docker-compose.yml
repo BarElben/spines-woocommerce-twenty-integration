@@ -1,0 +1,103 @@
+services:
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN_N8N=${DOMAIN_N8N}
+      - DOMAIN_TWENTY=${DOMAIN_TWENTY}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  n8n-db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=n8n
+      - POSTGRES_PASSWORD=${N8N_DB_PASSWORD}
+      - POSTGRES_DB=n8n
+    volumes:
+      - n8n_db_data:/var/lib/postgresql/data
+      - ./postgres-init/n8n-db:/docker-entrypoint-initdb.d:ro
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=n8n-db
+      - DB_POSTGRESDB_DATABASE=n8n
+      - DB_POSTGRESDB_USER=n8n
+      - DB_POSTGRESDB_PASSWORD=${N8N_DB_PASSWORD}
+      - N8N_HOST=${DOMAIN_N8N}
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://${DOMAIN_N8N}/
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - WC_WEBHOOK_SECRET=${WC_WEBHOOK_SECRET}
+      - TWENTY_API_KEY=${TWENTY_API_KEY}
+      - TWENTY_API_URL=http://twenty-server:3000
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - GENERIC_TIMEZONE=Asia/Jerusalem
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - n8n-db
+
+  twenty-db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=twenty
+      - POSTGRES_PASSWORD=${TWENTY_DB_PASSWORD}
+      - POSTGRES_DB=default
+    volumes:
+      - twenty_db_data:/var/lib/postgresql/data
+      - ./postgres-init/twenty-db:/docker-entrypoint-initdb.d:ro
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  twenty-server:
+    image: twentycrm/twenty:latest
+    restart: unless-stopped
+    environment:
+      - SERVER_URL=https://${DOMAIN_TWENTY}
+      - APP_SECRET=${TWENTY_APP_SECRET}
+      - PG_DATABASE_URL=postgres://twenty:${TWENTY_DB_PASSWORD}@twenty-db:5432/default
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - twenty_server_data:/app/packages/twenty-server/.local-storage
+    depends_on:
+      - twenty-db
+      - redis
+
+  twenty-worker:
+    image: twentycrm/twenty:latest
+    restart: unless-stopped
+    command: ["yarn", "worker:prod"]
+    environment:
+      - SERVER_URL=https://${DOMAIN_TWENTY}
+      - APP_SECRET=${TWENTY_APP_SECRET}
+      - PG_DATABASE_URL=postgres://twenty:${TWENTY_DB_PASSWORD}@twenty-db:5432/default
+      - REDIS_URL=redis://redis:6379
+      - DISABLE_DB_MIGRATIONS=true
+    depends_on:
+      - twenty-server
+
+volumes:
+  caddy_data:
+  caddy_config:
+  n8n_db_data:
+  n8n_data:
+  twenty_db_data:
+  redis_data:
+  twenty_server_data:
