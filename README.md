@@ -65,44 +65,71 @@ everything else inbound is closed except 80/443.
 - `postgres-init/` — first-boot bootstrap SQL for the two Postgres containers
   (see §3).
 
-## 2. Data flow `[STABLE design / IN PROGRESS build]`
+## 2. Data flow `[STABLE — built and verified]`
 
 ```
 WooCommerce order → status = Completed
         │
         ▼
   WooCommerce webhook (topic: order.updated, HMAC secret = WC_WEBHOOK_SECRET)
-        │  POST /webhook/woocommerce-orders
+        │  POST /woocommerce-orders   (path is lowercase — n8n webhook paths
+        │                              are case-sensitive; see §8)
         ▼
-  n8n: Webhook node (raw body capture)
-        │
+  n8n: Webhook  (raw body capture)
         ▼
-  n8n: Code node "Verify Signature"
+  n8n: Code "Verify Signature"
         │   HMAC-SHA256(raw body, WC_WEBHOOK_SECRET), timing-safe compare
-        │   against x-wc-webhook-signature header. Also short-circuits
+        │   against x-wc-webhook-signature header. Short-circuits
         │   WooCommerce's connectivity "ping" payload (webhook_id=..., no
         │   real signature) as a clean success without further processing.
         ▼
   n8n: IF "Only Completed"  (status == "completed")
         │  false → stop (no-op, no Twenty writes)
         ▼ true
-  [PENDING — category 5, not yet built in this workflow]
-  upsert Person (by email, lowercased)
-        → upsert Products (by SKU)
-        → upsert Order (by Woo order number; skip remaining steps if
-          Sync Status already = synced)
-        → create Order Line Items (name/price/variation SNAPSHOT as sold)
-        → set Order.Sync Status = synced   (last step — idempotent marker)
+  n8n: Code "Upsert Person"       — find/create by email (lowercased)
+        ▼
+  n8n: Code "Upsert Products"     — find/create by SKU; updates Current
+        │                            Price if found (Product is a live
+        │                            record — see §4 for why that's safe)
+        ▼
+  n8n: Code "Upsert Order"        — find/create by Woo Order Number; reads
+        │                            current Sync Status
+        ▼
+  n8n: IF "Already Synced?"
+        │  true  → "Skip - Already Synced" (NoOp, dead end — this is the
+        │           duplicate-webhook-delivery guard, see §5)
+        ▼ false
+  n8n: Code "Create Line Items"   — per Woo line item: name/price/variation
+        │                            SNAPSHOT as sold; skips if a line item
+        │                            for this exact (order, product,
+        │                            variation) already exists (finer-
+        │                            grained retry guard, see §5/§8)
+        ▼
+  n8n: Code "Set Sync Status Synced"  — updateOrder(syncStatus:
+                                          STATUS_SYNCED), deliberately the
+                                          last step — idempotent resume
+                                          marker (see §4, §5)
 ```
 
-The webhook gate (Webhook → Verify Signature → Only-Completed IF) is built and
-verified end-to-end against real WooCommerce traffic, including a rejected
-forged-signature request and the WooCommerce ping payload. The sync chain
-after the IF node (upserts into Twenty) is still being built — see
-`PROGRESS.md` category 5 for current state. **The exported workflow JSON in
-this repo will only be added once that chain is finished and verified**, so
-that the artifact in the repo reflects working, tested behavior rather than a
-partial workflow.
+The exported, working workflow lives at [`n8n/workflow.json`](./n8n/workflow.json)
+("WooCommerce Order Sync", 10 nodes) — see §6 for how to import it.
+
+**Verification performed** (all against live systems, re-queried via the
+Twenty API afterward, not just "the node ran green"): an isolated unit test of
+the Person upsert; a full synthetic order run through every step; a duplicate
+delivery of the identical payload (confirmed zero new records, short-circuited
+at "Already Synced?"); a simulated mid-chain crash followed by a retry
+(confirmed the retry resumed cleanly with no duplicate line items); and three
+real production orders (30/31/32) flipped to Completed through the actual
+WooCommerce webhook, covering a new guest customer, a returning registered
+customer, and a multi-product order with a variation and a paid add-on. Full
+test log in `PROGRESS.md`'s category 5 session notes.
+
+**Implementation note worth flagging for anyone extending this workflow:**
+n8n's Code nodes run in an external JS Task Runner process where plain
+`fetch()` is not available — every Twenty API call in this workflow instead
+uses n8n's own `this.helpers.httpRequest(...)` helper. Also, Twenty's GraphQL
+mutations take their input under the argument name `data`, not `input`.
 
 ## 3. Postgres init scripts `[STABLE]`
 
@@ -123,15 +150,29 @@ surprise) — they matter for anyone standing the stack up fresh from this repo.
 
 ## 4. CRM data model (in Twenty) `[STABLE]`
 
-Built directly in Twenty via its UI (custom objects + fields), not via SQL —
-Twenty owns and migrates its own Postgres schema.
+Built in Twenty as custom objects + fields (Person is Twenty's built-in
+object) via Twenty's own metadata API — not via hand-authored SQL, since
+Twenty owns and migrates its own Postgres schema internally. (Partway through
+the build these custom objects were briefly found *missing*, despite an
+earlier status-board entry claiming they were done — root-caused via direct
+Postgres inspection and rebuilt with a full live create/relate/reject-
+duplicate/delete round trip; see `PROGRESS.md` and `PROJECT_SUMMARY.md` for
+the full incident writeup.)
 
 | Object | Type | Unique key | Fields | Relations |
 |---|---|---|---|---|
 | **Person** | built-in | email, lowercased | (Twenty defaults) | ← Order.Customer |
 | **Product** | custom | SKU | SKU, Current Price, Description | ← Order Line Item.Product |
-| **Order** | custom | Woo Order Number | Total, Order Date, Sync Status (`pending`/`synced`) | Customer → Person |
+| **Order** | custom | Woo Order Number | Total, Order Date, Sync Status (`STATUS_PENDING` / `STATUS_SYNCED`; shown as "Pending"/"Synced" in the UI) | Customer → Person |
 | **Order Line Item** | custom | (Order, Product, Variation) composite in practice | Quantity, Unit Price, Line Total, Variation, Name (snapshot) | Order →, Product → |
+
+**A concrete naming constraint worth knowing:** Twenty validates SELECT field
+option values against a two-segment pattern (`^[A-Z0-9]+_[A-Z0-9]+$`) — a bare
+`PENDING` is rejected. That's why Sync Status stores `STATUS_PENDING` /
+`STATUS_SYNCED` under the hood while the human-facing labels stay exactly
+"Pending"/"Synced." Anything writing to this field — the n8n sync chain, a
+Twenty automation's trigger filter — has to use the real enum literal, not
+the label.
 
 **Why this shape:**
 - **Person matched by lowercased email** — the one identifier guaranteed
@@ -149,24 +190,30 @@ Twenty owns and migrates its own Postgres schema.
   what the customer actually bought and paid. Only the Line Item's own
   Unit Price / Line Total / Name are historical truth; the related Product
   record's Current Price is allowed to drift forward.
-- **Sync Status flips to `synced` as the literal last write in the chain.**
+- **Sync Status flips to `Synced` as the literal last write in the chain.**
   This is what makes partial-failure retries safe (see §5) and is also the
   resume marker + what the completed-order email automation (category 6)
   triggers on.
 
-## 5. Duplicate prevention + retry approach `[STABLE design]`
+## 5. Duplicate prevention + retry approach `[STABLE — built and verified]`
 
 Core principle: **upsert-everything, keyed by a stable natural identifier,
 nothing keyed by "did we already see this webhook."**
 
-| Failure mode (from the assignment's required test scenarios) | How it's handled |
-|---|---|
-| Same webhook delivered twice (WooCommerce retries on any non-2xx, or manual re-delivery) | Every write is "look up by unique key, create only if missing." Re-running the whole chain against an already-synced order re-finds the same Person/Product/Order/Line-Item rows and writes nothing new. |
-| Retry after a partial failure (e.g. Person + Products upserted, then a transient error before Order/Line-Items) | Because every step is independently idempotent (upsert-by-key), simply re-running the same execution (or a fresh delivery of the same webhook) picks up wherever it left off — already-created rows are found, not duplicated, and the remaining steps proceed. `Sync Status` staying `pending` is itself the signal that a retry is still needed. |
-| Order already fully synced | The Order upsert step checks `Sync Status`; if already `synced`, the remaining line-item/email-triggering steps are skipped — so a duplicate delivery after full success is a fast no-op, not a re-processing. |
-| Returning customer | Person upsert by lowercased email finds the existing record instead of creating a second one. |
-| Same product across multiple orders | Product upsert by SKU finds the existing Product record; only a new Order Line Item (pointing at the existing Product) is created per order. |
-| Multi-product / variations / add-ons in one order | Each Woo line item (including variations and the add-on-as-separate-line-item, see `CLAUDE.md`'s product design notes) becomes its own Order Line Item row, all pointing at the same Order. |
+| Failure mode (from the assignment's required test scenarios) | How it's handled | Verified |
+|---|---|---|
+| Same webhook delivered twice (WooCommerce retries on any non-2xx, or manual re-delivery) | Every write is "look up by unique key, create only if missing." Re-running the whole chain against an already-synced order re-finds the same Person/Product/Order/Line-Item rows and writes nothing new — the "Already Synced?" IF short-circuits before Create Line Items even runs. | Yes — resent an identical payload; API confirmed record counts unchanged. |
+| Retry after a partial failure (e.g. Person + Products upserted, then a crash before Order/Line-Items) | Every step is independently idempotent (upsert-by-key), so re-running the same or a fresh delivery picks up wherever it left off — already-created rows are found, not duplicated. `Sync Status` staying `Pending` is itself the signal that a retry is still owed. | Yes — a workflow forced to crash mid-chain, then re-run for real; API confirmed the order ended with exactly the right number of line items, not double. |
+| Order already fully synced | The Order upsert step checks `Sync Status`; if already `Synced`, the "Already Synced?" IF skips straight to a dead-end NoOp — a duplicate delivery after full success is a fast no-op, not a re-processing. | Yes. |
+| Returning customer | Person upsert by lowercased email finds the existing record instead of creating a second one — true for both guest and registered customers. | Yes — real order 31 (Alice, returning) resolved to the same Person id as order 30. |
+| Same product across multiple orders | Product upsert by SKU finds the existing Product record; only a new Order Line Item (pointing at the existing Product) is created per order. | Yes — SRV-PROOF confirmed as a single reused Product row across two real orders. |
+| Multi-product / variations / add-ons in one order | Each Woo line item (including variations and the add-on-as-separate-line-item) becomes its own Order Line Item row, all pointing at the same Order. | Yes — real order 30 (Signature package variation + Audiobook add-on) produced exactly 2 correctly-priced line items. |
+
+A second, finer-grained guard sits underneath the order-level check: **Create
+Line Items** looks up each line by the exact `(order, product, variation)`
+triple before creating it, so even a crash *inside* line-item creation (some
+lines written, others not) can be safely retried without double-creating the
+lines that already exist.
 
 This is deliberately **not** "record webhook delivery IDs and drop duplicates,"
 because that approach doesn't help with partial-failure retries (a retry may
@@ -179,10 +226,7 @@ Signature verification (HMAC-SHA256, timing-safe compare) additionally
 ensures only genuine WooCommerce-originated requests reach the sync chain at
 all — see §2.
 
-## 6. Setup `[PENDING — final steps depend on category 5 completion]`
-
-High-level steps (will be filled in with exact commands once the sync chain
-and workflow export are finalized):
+## 6. Setup `[STABLE]`
 
 1. Provision an Ubuntu server, open only 80/443/22 (22 restricted to your IP).
 2. `git clone` this repo, `cp .env.example .env`, fill in real values (see
@@ -191,16 +235,33 @@ and workflow export are finalized):
    needs no DNS setup — see §1).
 4. `docker compose up -d` — brings up the full stack; Caddy will obtain
    HTTPS certs automatically on first request to each hostname.
-5. Complete first-run setup in the Twenty UI (create workspace, build the
-   custom objects in §4, generate an API key for `TWENTY_API_KEY`).
-6. Install WooCommerce on the WordPress site, configure the webhook
-   (topic `order.updated`, secret = `WC_WEBHOOK_SECRET`, delivery URL
-   `https://<DOMAIN_N8N>/webhook/woocommerce-orders`).
-7. `[PENDING]` Import the exported n8n workflow (`n8n/workflow.json`, not yet
-   added — see §2) and activate it.
-8. `[PENDING]` Run `scripts/seed-orders.sh <admin-username>` to create test
-   customers/products/orders, or place orders manually, then walk through the
-   demo scenarios in `[PENDING — category 7]`.
+5. Complete first-run setup in Twenty (create the workspace, generate an API
+   key in Settings → APIs & Webhooks for `TWENTY_API_KEY`), then build the
+   custom objects/fields/relations from §4 — either by hand in
+   Settings → Data model, or by replicating them via Twenty's
+   `/rest/metadata/objects` + `/rest/metadata/fields` endpoints (see
+   `PROGRESS.md`'s category 3 session notes for the exact request payloads
+   this project used, including the `relationCreationPayload` shape and the
+   two-segment SELECT-option requirement from §4).
+6. Install WooCommerce on the WordPress site, configure the webhook (topic
+   `order.updated`, secret = `WC_WEBHOOK_SECRET`, delivery URL
+   `https://<DOMAIN_N8N>/webhook/woocommerce-orders` — note the path is
+   lowercase; n8n webhook paths are case-sensitive).
+7. Import the exported workflow into n8n:
+   ```bash
+   docker compose cp n8n/workflow.json n8n:/tmp/workflow.json
+   docker compose exec n8n n8n import:workflow --input=/tmp/workflow.json --activeState=fromJson
+   ```
+   The export's `active` field is `true`, so `--activeState=fromJson` should
+   activate it directly on import; if it doesn't (this can depend on n8n
+   version/project assignment), open the workflow in the n8n UI and flip the
+   Active toggle by hand. Confirm it's live by checking Executions after the
+   next real webhook delivery.
+8. Run `scripts/seed-orders.sh <admin-username>` to create test
+   customers/products/orders, or place orders manually through the
+   WordPress/WooCommerce admin, then flip an order to **Completed** to
+   trigger a real sync. See §7 `[PENDING]` for the full demonstration
+   walkthrough once it's recorded.
 
 ## 7. Demonstration scenarios `[PENDING — category 7, not started]`
 
@@ -231,20 +292,33 @@ Twenty state + screenshots/log excerpts) once categories 5–6 are done.
   the webhook → n8n → Twenty pipeline (which does not depend on WordPress
   mail), but it is a known gap if WooCommerce's own customer-facing emails
   were ever required.
-- **Twenty's data model was built by hand via the UI**, not via a migration
-  script, per the assignment's allowance to design/document the model rather
-  than mandate infrastructure-as-code for Twenty's own schema. This means
-  recreating the object model on a fresh Twenty instance is a manual (but
-  documented, see §4) step, not a single command.
+- **Twenty's data model was created via Twenty's own metadata API**
+  (`/rest/metadata/objects` + `/rest/metadata/fields`), not via a hand-rolled
+  migration script and not by clicking through the UI — Twenty owns and
+  migrates its own Postgres schema, so this project drove that schema through
+  Twenty's own supported API surface instead of writing SQL against it
+  directly. This means recreating the object model on a fresh Twenty instance
+  is either a manual UI step or a scripted replay of those API calls (both
+  documented, see §4/§6), not a single `docker compose up`.
 - **Order Line Item's "unique key"** is described in §4 as a composite
   (Order, Product, Variation) rather than a single dedicated field, because
   Twenty's custom objects don't enforce composite-unique constraints at the
   database level the way a hand-rolled Postgres schema could — dedup safety
   for line items instead comes from the *Order*-level `Sync Status` gate (an
   order is only ever line-itemed once, since re-runs against an already-synced
-  order skip line-item creation entirely; see §5). Worth knowing as a modeling
-  trade-off, not a silent gap.
-- **This README will keep changing** until categories 5–7 are complete — the
+  order skip line-item creation entirely, plus the finer-grained per-line-item
+  existence check described in §5) rather than a database constraint. Worth
+  knowing as a modeling trade-off, not a silent gap.
+- **The line-item dedup key is (Order, Product, Variation) — not WooCommerce's
+  own internal `line_item.id`.** This is correct for this catalog: WooCommerce
+  never produces two separate line items for the same product + variation
+  within one order here, so the composite key is a faithful match. It would
+  misbehave for a hypothetical future catalog that legitimately needed two
+  distinct line entries for the *same* product + variation in a single order
+  (e.g. the same service booked twice for two different scheduled dates) — a
+  real edge case this integration does not attempt to handle, disclosed here
+  rather than silently assumed away.
+- **This README will keep changing** until categories 6–7 are complete — the
   `[PENDING]` tags above are intentionally visible rather than pre-writing
   content for work that hasn't happened yet.
 

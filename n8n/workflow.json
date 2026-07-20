@@ -1,0 +1,318 @@
+{
+  "updatedAt": "2026-07-20T13:15:44.694Z",
+  "createdAt": "2026-07-19T10:11:54.067Z",
+  "id": "OIOadgyS7EXEwyIU",
+  "name": "WooCommerce Order Sync",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "woocommerce-orders",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "285fc43c-10db-460c-b8d3-da83db8c857c",
+      "name": "Webhook",
+      "webhookId": "324f55ff-68bf-4cd8-9848-2bbb290f440d"
+    },
+    {
+      "parameters": {
+        "jsCode": "// WooCommerce signs every webhook: HMAC-SHA256 over the raw body,\n// using our shared secret, sent in the x-wc-webhook-signature header.\n// We recompute it and compare \u2014 matching proof the call is really our shop.\nconst crypto = require('crypto');\n\nconst secret = $env.WC_WEBHOOK_SECRET;\nif (!secret) throw new Error('WC_WEBHOOK_SECRET not set in n8n environment');\n\nconst headers = $input.first().json.headers;\nconst signature = headers['x-wc-webhook-signature'];\n\n// Recover the exact raw bytes WooCommerce sent (Raw Body option)\nconst rawBinary = $input.first().binary?.data;\nif (!rawBinary) throw new Error('Raw body missing \u2014 enable Raw Body on the Webhook node');\nconst rawBody = Buffer.from(rawBinary.data, 'base64').toString('utf8');\n\n// WooCommerce sends a plain \"ping\" when a webhook is first saved \u2014 not an order.\n// Acknowledge it quietly and stop.\nif (rawBody.startsWith('webhook_id=')) {\n  return [];\n}\n\nif (!signature) throw new Error('Missing signature header \u2014 request rejected');\n\n// Recompute the HMAC and compare in constant time (prevents timing attacks)\nconst expected = crypto.createHmac('sha256', secret).update(rawBody, 'utf8').digest('base64');\nconst a = Buffer.from(signature);\nconst b = Buffer.from(expected);\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n  throw new Error('Invalid webhook signature \u2014 request rejected');\n}\n\n// Signature valid \u2014 parse the order and pass it downstream\nconst order = JSON.parse(rawBody);\nreturn [{ json: order }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        208,
+        -16
+      ],
+      "id": "b6c8e92c-0656-43fb-90d0-1f543f2be4e5",
+      "name": "Verify Signature"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "20948104-ec8b-4367-a62d-130f2c8a700c",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        416,
+        -16
+      ],
+      "id": "41eb2c20-b8fa-4db9-9e01-ba4efed9ef3a",
+      "name": "Only Completed"
+    },
+    {
+      "parameters": {
+        "jsCode": "const helpers = this.helpers;\nconst url = $env.TWENTY_API_URL;\nconst key = $env.TWENTY_API_KEY;\n\nasync function gql(query, variables) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: url + '/graphql',\n    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },\n    body: { query, variables },\n    json: true,\n  });\n  if (res.errors) throw new Error('Twenty GraphQL error: ' + JSON.stringify(res.errors));\n  return res.data;\n}\n\nconst order = $json;\nconst email = ((order.billing && order.billing.email) || '').trim().toLowerCase();\nconst firstName = (order.billing && order.billing.first_name) || '';\nconst lastName = (order.billing && order.billing.last_name) || '';\n\nif (!email) {\n  throw new Error('Order #' + order.number + ' has no billing email - cannot upsert Person');\n}\n\nconst findQuery = `query FindPerson($email: String!) {\n  people(filter: { emails: { primaryEmail: { eq: $email } } }, first: 1) {\n    edges { node { id } }\n  }\n}`;\n\nconst findResult = await gql(findQuery, { email });\nconst existing = findResult.people.edges[0];\n\nlet personId;\nif (existing) {\n  personId = existing.node.id;\n} else {\n  const createMutation = `mutation CreatePerson($data: PersonCreateInput!) {\n    createPerson(data: $data) { id }\n  }`;\n  const createResult = await gql(createMutation, {\n    data: {\n      name: { firstName, lastName },\n      emails: { primaryEmail: email },\n    },\n  });\n  personId = createResult.createPerson.id;\n}\n\nreturn [{ json: { ...order, _personId: personId, _personEmail: email } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        -16
+      ],
+      "id": "c1a1b111-0001-4a11-8111-000000000001",
+      "name": "Upsert Person"
+    },
+    {
+      "parameters": {
+        "jsCode": "const helpers = this.helpers;\nconst url = $env.TWENTY_API_URL;\nconst key = $env.TWENTY_API_KEY;\n\nasync function gql(query, variables) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: url + '/graphql',\n    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },\n    body: { query, variables },\n    json: true,\n  });\n  if (res.errors) throw new Error('Twenty GraphQL error: ' + JSON.stringify(res.errors));\n  return res.data;\n}\n\nconst order = $json;\nconst lineItems = order.line_items || [];\nconst currencyCode = (order.currency || 'USD').toUpperCase();\n\n// De-dupe by SKU within this order (defensive - Woo shouldn't repeat a SKU\n// as two separate line items, but don't do redundant API calls if it does).\nconst bySku = new Map();\nfor (const li of lineItems) {\n  if (!li.sku) continue; // no SKU on this line - Upsert Products can't key it; Create Line Items will fail loudly later if it's actually needed\n  if (!bySku.has(li.sku)) bySku.set(li.sku, li);\n}\n\nconst productMap = {};\n\nfor (const [sku, li] of bySku.entries()) {\n  const unitPrice = Number(li.price) || 0;\n  const amountMicros = Math.round(unitPrice * 1000000);\n\n  const findQuery = `query FindProduct($sku: String!) {\n    products(filter: { sku: { eq: $sku } }, first: 1) {\n      edges { node { id } }\n    }\n  }`;\n  const findResult = await gql(findQuery, { sku });\n  const existing = findResult.products.edges[0];\n\n  let productId;\n  if (existing) {\n    productId = existing.node.id;\n    // Product is a LIVE record (not a snapshot) - keep its Current Price fresh.\n    // The historical price-as-sold is preserved separately on the Order Line\n    // Item created downstream, so updating this never rewrites history.\n    const updateMutation = `mutation UpdateProduct($id: UUID!, $data: ProductUpdateInput!) {\n      updateProduct(id: $id, data: $data) { id }\n    }`;\n    await gql(updateMutation, {\n      id: productId,\n      data: { currentPrice: { amountMicros, currencyCode } },\n    });\n  } else {\n    const createMutation = `mutation CreateProduct($data: ProductCreateInput!) {\n      createProduct(data: $data) { id }\n    }`;\n    const createResult = await gql(createMutation, {\n      data: {\n        sku,\n        name: li.name,\n        currentPrice: { amountMicros, currencyCode },\n      },\n    });\n    productId = createResult.createProduct.id;\n  }\n\n  productMap[sku] = productId;\n}\n\nreturn [{ json: { ...order, _productMap: productMap } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        -16
+      ],
+      "id": "c1a1b111-0002-4a11-8111-000000000002",
+      "name": "Upsert Products"
+    },
+    {
+      "parameters": {
+        "jsCode": "const helpers = this.helpers;\nconst url = $env.TWENTY_API_URL;\nconst key = $env.TWENTY_API_KEY;\n\nasync function gql(query, variables) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: url + '/graphql',\n    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },\n    body: { query, variables },\n    json: true,\n  });\n  if (res.errors) throw new Error('Twenty GraphQL error: ' + JSON.stringify(res.errors));\n  return res.data;\n}\n\nconst order = $json;\nconst wooOrderNumber = String(order.number || order.id);\nconst currencyCode = (order.currency || 'USD').toUpperCase();\nconst totalAmountMicros = Math.round((Number(order.total) || 0) * 1000000);\nconst orderDate = ((order.date_created || order.date_created_gmt || '').split('T')[0]) || null;\n\nconst findQuery = `query FindOrder($n: String!) {\n  orders(filter: { wooOrderNumber: { eq: $n } }, first: 1) {\n    edges { node { id syncStatus } }\n  }\n}`;\nconst findResult = await gql(findQuery, { n: wooOrderNumber });\nconst existing = findResult.orders.edges[0];\n\nlet orderId;\nlet alreadySynced = false;\nlet isNewOrder = false;\n\nif (existing) {\n  orderId = existing.node.id;\n  alreadySynced = existing.node.syncStatus === 'STATUS_SYNCED';\n} else {\n  const createMutation = `mutation CreateOrder($data: OrderCreateInput!) {\n    createOrder(data: $data) { id syncStatus }\n  }`;\n  const createResult = await gql(createMutation, {\n    data: {\n      wooOrderNumber,\n      total: { amountMicros: totalAmountMicros, currencyCode },\n      orderDate,\n      syncStatus: 'STATUS_PENDING',\n      customerId: order._personId,\n    },\n  });\n  orderId = createResult.createOrder.id;\n  isNewOrder = true;\n  alreadySynced = false;\n}\n\nreturn [{ json: { ...order, _orderId: orderId, _alreadySynced: alreadySynced, _isNewOrder: isNewOrder } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        -16
+      ],
+      "id": "c1a1b111-0003-4a11-8111-000000000003",
+      "name": "Upsert Order"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-already-synced",
+              "leftValue": "={{ $json._alreadySynced }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1248,
+        -16
+      ],
+      "id": "c1a1b111-0004-4a11-8111-000000000004",
+      "name": "Already Synced?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1456,
+        -120
+      ],
+      "id": "c1a1b111-0005-4a11-8111-000000000005",
+      "name": "Skip - Already Synced"
+    },
+    {
+      "parameters": {
+        "jsCode": "const helpers = this.helpers;\nconst url = $env.TWENTY_API_URL;\nconst key = $env.TWENTY_API_KEY;\n\nasync function gql(query, variables) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: url + '/graphql',\n    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },\n    body: { query, variables },\n    json: true,\n  });\n  if (res.errors) throw new Error('Twenty GraphQL error: ' + JSON.stringify(res.errors));\n  return res.data;\n}\n\nconst order = $json;\nconst orderId = order._orderId;\nconst productMap = order._productMap || {};\nconst lineItems = order.line_items || [];\nconst currencyCode = (order.currency || 'USD').toUpperCase();\n\nconst created = [];\nconst skipped = [];\n\nfor (const li of lineItems) {\n  if (!li.sku) {\n    throw new Error('Line item \"' + li.name + '\" on order ' + order.number + ' has no SKU - cannot link to a Product');\n  }\n  const productId = productMap[li.sku];\n  if (!productId) {\n    throw new Error('No Twenty product id found for SKU ' + li.sku + ' on order ' + order.number + ' - Upsert Products must run before this node');\n  }\n\n  // Woo variation attributes (e.g. Plan: Signature) come through as meta_data\n  // with display_key/display_value. Join all display_values - our catalog only\n  // ever has one (Plan), but this doesn't assume that.\n  const variation = ((li.meta_data || [])\n    .map((m) => m.display_value)\n    .filter(Boolean)\n    .join(', ')) || null;\n\n  const unitPriceMicros = Math.round((Number(li.price) || 0) * 1000000);\n  const lineTotalMicros = Math.round((Number(li.total) || 0) * 1000000);\n\n  // Idempotency guard at line-item granularity: if a line item for this exact\n  // order + product (+ variation) already exists, skip it. This is what makes\n  // retry-after-partial-failure safe even if a previous run of this node\n  // crashed after creating only some of the order's line items - and it's a\n  // second, finer-grained safety net under the order-level Sync Status guard\n  // (which already skips this whole node when the order was fully synced).\n  const variationFilter = variation ? { eq: variation } : { is: 'NULL' };\n  const findQuery = `query FindLineItem($orderId: UUID!, $productId: UUID!, $variationFilter: StringFilter) {\n    orderLineItems(filter: { order: { id: { eq: $orderId } }, product: { id: { eq: $productId } }, variation: $variationFilter }, first: 1) {\n      edges { node { id } }\n    }\n  }`;\n  const findResult = await gql(findQuery, { orderId, productId, variationFilter });\n  if (findResult.orderLineItems.edges.length > 0) {\n    skipped.push({ sku: li.sku, id: findResult.orderLineItems.edges[0].node.id });\n    continue;\n  }\n\n  const createMutation = `mutation CreateLineItem($data: OrderLineItemCreateInput!) {\n    createOrderLineItem(data: $data) { id }\n  }`;\n  const createResult = await gql(createMutation, {\n    data: {\n      name: li.name, // snapshot of the product name AS SOLD - not a live lookup\n      quantity: li.quantity,\n      unitPrice: { amountMicros: unitPriceMicros, currencyCode },\n      lineTotal: { amountMicros: lineTotalMicros, currencyCode },\n      variation,\n      orderId,\n      productId,\n    },\n  });\n  created.push({ sku: li.sku, id: createResult.createOrderLineItem.id });\n}\n\nreturn [{ json: { ...order, _lineItemsCreated: created, _lineItemsSkipped: skipped } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1456,
+        80
+      ],
+      "id": "c1a1b111-0006-4a11-8111-000000000006",
+      "name": "Create Line Items"
+    },
+    {
+      "parameters": {
+        "jsCode": "const helpers = this.helpers;\nconst url = $env.TWENTY_API_URL;\nconst key = $env.TWENTY_API_KEY;\n\nasync function gql(query, variables) {\n  const res = await helpers.httpRequest({\n    method: 'POST',\n    url: url + '/graphql',\n    headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },\n    body: { query, variables },\n    json: true,\n  });\n  if (res.errors) throw new Error('Twenty GraphQL error: ' + JSON.stringify(res.errors));\n  return res.data;\n}\n\nconst order = $json;\n\n// Deliberately the LAST step of the whole chain: an idempotent resume marker.\n// If everything above already ran to completion for this order, this is the\n// only thing left to do; if the workflow crashes before this point and is\n// retried, steps 1-4 are all safe upserts / existence checks, so re-running\n// them causes no duplicates, and this flip only ever happens once real work\n// is actually done.\nconst mutation = `mutation SetSynced($id: UUID!, $data: OrderUpdateInput!) {\n  updateOrder(id: $id, data: $data) { id syncStatus }\n}`;\nconst result = await gql(mutation, { id: order._orderId, data: { syncStatus: 'STATUS_SYNCED' } });\n\nreturn [{ json: { ...order, _syncStatus: result.updateOrder.syncStatus } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1664,
+        80
+      ],
+      "id": "c1a1b111-0007-4a11-8111-000000000007",
+      "name": "Set Sync Status Synced"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Signature": {
+      "main": [
+        [
+          {
+            "node": "Only Completed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Only Completed": {
+      "main": [
+        [
+          {
+            "node": "Upsert Person",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Upsert Person": {
+      "main": [
+        [
+          {
+            "node": "Upsert Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Products": {
+      "main": [
+        [
+          {
+            "node": "Upsert Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Order": {
+      "main": [
+        [
+          {
+            "node": "Already Synced?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Synced?": {
+      "main": [
+        [
+          {
+            "node": "Skip - Already Synced",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Line Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Line Items": {
+      "main": [
+        [
+          {
+            "node": "Set Sync Status Synced",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "staticData": null,
+  "meta": null,
+  "nodeGroups": [],
+  "pinData": {
+    "Webhook": [
+      {
+        "json": {
+          "name": "First item",
+          "code": 1
+        }
+      },
+      {
+        "json": {
+          "name": "Second item",
+          "code": 2
+        }
+      }
+    ]
+  },
+  "versionId": "90b476e6-d456-4820-a01e-cf1b1b286e6c",
+  "activeVersionId": "90b476e6-d456-4820-a01e-cf1b1b286e6c",
+  "versionCounter": 22,
+  "triggerCount": 1,
+  "sourceWorkflowId": null,
+  "tags": [],
+  "versionMetadata": {
+    "name": "Version 4740d2fa",
+    "description": ""
+  }
+}
