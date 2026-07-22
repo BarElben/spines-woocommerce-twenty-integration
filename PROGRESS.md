@@ -268,7 +268,7 @@ modify any real secret value in `.env` (only extracted variable *names* via
   working behavior.
 - README §6 (Setup) final exact commands and §7 (Demonstration scenarios) —
   both depend on the workflow export existing and categories 6/7 being done.
-- Submission to nir@spines.com — not done, not requested yet.
+- Submission to the recipient — not done, not requested yet.
 
 Category 8 is now blocked purely on categories 5/6/7 finishing; nothing else
 in this lane is pending on my end.
@@ -276,7 +276,7 @@ in this lane is pending on my end.
 ## Category 8 addendum (2026-07-20, docs-agent) — presentation summary requested
 
 Owner asked, separately from the core repo-hygiene deliverables above, for a
-presentation-ready summary suitable for showing Spines directly. Re-read this
+presentation-ready summary suitable for showing the client directly. Re-read this
 whole board (including the category 3 rebuild and category 6 findings added
 since my last pass) and produced two artifacts reflecting the current state:
 
@@ -1742,7 +1742,7 @@ verified: no secrets found or leaked, workflow export confirmed current,
 postgres init scripts confirmed accurate, real doc staleness fixed (not just
 cosmetic), working tree staged and ready. The remaining 10% is category 6's
 UI fixes finishing (not mine to do) and sending the actual submission email
-to nir@spines.com once everything is green.
+to the recipient once everything is green.
 
 ## Category 7 session notes (2026-07-22, demo-agent) — Scenario 7 prep only, per explicit instruction not to run it or touch category 6
 
@@ -3355,7 +3355,7 @@ part being cosmetically double-escaped, plain-text part correct).
 6. **Did not commit, push, or send the submission email** — per explicit
    instruction, staged the reviewed-safe files
    (`README.md`, `AI_TOOLS.md`, `demo-results.md`, `demo-script.md`) and left
-   `git commit`/`git push`/emailing nir@spines.com for the owner to trigger
+   `git commit`/`git push`/emailing the recipient for the owner to trigger
    themselves.
 
 **What's left before the owner can approve final commit + submission:**
@@ -3368,7 +3368,7 @@ part being cosmetically double-escaped, plain-text part correct).
 - Run `git add -A` (or a scoped `git add` matching this session's file list)
   plus a final `git status`/`git diff --cached` eyeball pass, then
   `git commit` and, only once the owner is satisfied, send the submission
-  email to nir@spines.com with the repo link. None of that was run this
+  email to the recipient with the repo link. None of that was run this
   session.
 
 **Honest 98%.** Every deliverable required by the assignment is present,

@@ -1,4 +1,4 @@
-# Project Brief — WooCommerce → Twenty CRM Integration (Spines)
+# Project Brief — WooCommerce → Twenty CRM Integration
 
 Objective: whenever a WooCommerce order reaches Completed, an n8n workflow syncs
 the customer, order, products, quantities, prices, variations, and add-ons into
@@ -41,4 +41,4 @@ Deliverables: repo with Docker Compose + reverse proxy config, .env.example
 (no secrets), exported n8n workflow, PostgreSQL init scripts, README (setup,
 architecture + data model, duplicate-prevention + retry approach, limitations
 and assumptions). Note AI tools used, for what, and how output was validated.
-Submit to nir@spines.com and confirm receipt.
+Submit the repo and confirm receipt.

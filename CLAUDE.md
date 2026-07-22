@@ -1,7 +1,7 @@
-# Spines — WooCommerce → Twenty CRM Integration
+# WooCommerce → Twenty CRM Integration
 
 ## Mission
-Engineering project for Spines (book publishing platform). Build and deploy:
+Engineering project for a book publishing platform. Build and deploy:
 WooCommerce order reaches Completed → webhook → n8n workflow → sync customer,
 order, products, quantities, prices, variations, add-ons into self-hosted Twenty CRM.
 Deliverables: git repo (compose + proxy config, .env.example, exported n8n workflow,
@@ -21,7 +21,7 @@ limitations).
   wordpress:cli container on network spines_default
 
 ## Shop data (DONE)
-Products themed on Spines' real catalog:
+Products themed on the platform's real catalog:
 - Manuscript Proofreading — simple, SKU SRV-PROOF
 - Book Publishing Package — variable, attribute Plan: Essential/Signature/Paramount,
   SKUs PKG-ESS/PKG-SIG/PKG-PAR (variations created via CLI, product id 17)

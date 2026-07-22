@@ -1,6 +1,6 @@
-# Spines — WooCommerce → Twenty CRM Integration
+# WooCommerce → Twenty CRM Integration
 
-An engineering project for Spines. When a WooCommerce order reaches
+An engineering project for a book publishing platform. When a WooCommerce order reaches
 **Completed**, a webhook fires to a self-hosted **n8n** workflow, which syncs the
 customer, order, products, quantities, prices, variations, and add-ons into a
 self-hosted **Twenty CRM** — with duplicate-safe upserts and retry handling.
@@ -197,7 +197,7 @@ the label.
   checkout (billing email only). Handles "returning customer" correctly
   whether or not they ever created an account.
 - **Product matched by SKU**, not by internal Woo product ID alone — SKU is
-  the stable human/business identifier Spines already assigns, and it's what
+  the stable human/business identifier already assigned by the business, and it's what
   uniquely identifies a *variation* too (e.g. `PKG-SIG` vs `PKG-ESS`), so
   variations upsert as their own Product-like line-item references without
   extra modeling.

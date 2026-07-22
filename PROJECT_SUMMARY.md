@@ -76,7 +76,7 @@ upserts are safe to run any number of times.
 - **Email, lowercased,** is the one identifier guaranteed present whether the
   customer registered an account or checked out as a guest — a returning
   guest and a returning registered customer both resolve to the same Person.
-- **SKU** is the business identifier Spines already assigns, specific enough
+- **SKU** is the business identifier already assigned by the business, specific enough
   to distinguish variations directly (`PKG-ESS` vs. `PKG-SIG` vs. `PKG-PAR`)
   without extra modeling.
 - **Order Line Item's Name field is a point-in-time snapshot** of the product
