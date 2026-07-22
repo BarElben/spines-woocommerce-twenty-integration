@@ -9,6 +9,7 @@ services:
     environment:
       - DOMAIN_N8N=${DOMAIN_N8N}
       - DOMAIN_TWENTY=${DOMAIN_TWENTY}
+      - DOMAIN_MAIL=${DOMAIN_MAIL}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -74,6 +75,21 @@ services:
       - APP_SECRET=${TWENTY_APP_SECRET}
       - PG_DATABASE_URL=postgres://twenty:${TWENTY_DB_PASSWORD}@twenty-db:5432/default
       - REDIS_URL=redis://redis:6379
+      # Demo-only: disables Twenty's SSRF guard (private-IP block) on outbound
+      # HTTP/IMAP/SMTP connections so the workflow email step and the
+      # Settings > Accounts connection test can reach the in-network Mailhog
+      # catcher (mailhog:1025, a private Docker IP). Safe here because this
+      # stack has no real external SMTP relay and Mailhog is not
+      # internet-reachable; would NOT be an acceptable setting on a real
+      # deployment with genuine external mail creds.
+      - OUTBOUND_HTTP_SAFE_MODE_ENABLED=false
+      # Twenty's Code-step (logic function) driver defaults to DISABLED
+      # unless NODE_ENV=development (we run production). Without this, any
+      # workflow Code step fails to transpile with "Logic function execution
+      # is disabled" and the workflow can never be Activated. LOCAL runs the
+      # code in a plain Node child process (no AWS Lambda needed) - correct
+      # choice for this single-host deployment.
+      - LOGIC_FUNCTION_TYPE=LOCAL
     volumes:
       - twenty_server_data:/app/packages/twenty-server/.local-storage
     depends_on:
@@ -90,8 +106,36 @@ services:
       - PG_DATABASE_URL=postgres://twenty:${TWENTY_DB_PASSWORD}@twenty-db:5432/default
       - REDIS_URL=redis://redis:6379
       - DISABLE_DB_MIGRATIONS=true
+      # See note on twenty-server: workflow SEND_EMAIL/HTTP steps can run on
+      # the worker, so it needs the same SSRF-guard relaxation to reach
+      # Mailhog. Demo-only, see twenty-server's comment for the full rationale.
+      - OUTBOUND_HTTP_SAFE_MODE_ENABLED=false
+      # See twenty-server's comment: Code-step workflow actions need this
+      # explicitly set to LOCAL or they fail to transpile/execute.
+      - LOGIC_FUNCTION_TYPE=LOCAL
+    volumes:
+      # RunWorkflowJob (the code that actually executes a Code step's JS)
+      # runs on this worker container, not twenty-server. It reads the
+      # compiled function bundle from local disk storage
+      # (LogicFunctionResourceService/LocalLayerManagerService) - without
+      # this same volume mounted here, the worker can't see what
+      # twenty-server built/wrote, and every Code step fails with
+      # "File not found" even though the file genuinely exists on
+      # twenty-server's copy of the volume.
+      - twenty_server_data:/app/packages/twenty-server/.local-storage
     depends_on:
       - twenty-server
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    restart: unless-stopped
+    # Demo-only disposable mail catcher (category 6 deliverable): gives Twenty's
+    # "Connected Accounts" (Settings > Accounts > IMAP/SMTP/CalDAV, SMTP-only)
+    # a real SMTP server to send through, and its own web UI (behind Caddy at
+    # DOMAIN_MAIL) to visually confirm the completed-order email fires and
+    # composes correctly. No real mail delivery — nothing here ever leaves
+    # the Docker network. Not wired into WordPress/n8n; Twenty's Send Email
+    # workflow step only.
 
 volumes:
   caddy_data:

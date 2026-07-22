@@ -9,3 +9,7 @@
 {$DOMAIN_WP} {
     reverse_proxy wordpress:80
 }
+
+{$DOMAIN_MAIL} {
+    reverse_proxy mailhog:8025
+}

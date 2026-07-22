@@ -5,11 +5,12 @@ Tech Lead hiring assignment for Spines. When a WooCommerce order reaches
 customer, order, products, quantities, prices, variations, and add-ons into a
 self-hosted **Twenty CRM** — with duplicate-safe upserts and retry handling.
 
-> **Status note (this README is a living document):** sections below are marked
-> `[STABLE]` where the design/implementation is finished and verified, or
-> `[IN PROGRESS]` / `[PENDING]` where work is still ongoing in this repo's build.
-> See `PROGRESS.md` for the current per-category percentage and verification
-> notes. Do not treat `[PENDING]` sections as final.
+> **Status note:** every functional part of this build is now finished and
+> verified end-to-end — infrastructure, shop data, Twenty data model, webhook
+> gate, sync chain, both Twenty automations, and all 7 required demo
+> scenarios. Sections below are marked `[STABLE]` throughout. See
+> `PROGRESS.md` for the full session-by-session verification trail behind
+> each claim.
 
 ---
 
@@ -54,7 +55,8 @@ everything else inbound is closed except 80/443.
 
 **Compose file layout:**
 - `docker-compose.yml` — the core stack: caddy, n8n + n8n-db, twenty-server +
-  twenty-worker + twenty-db + redis.
+  twenty-worker + twenty-db + redis, plus a `mailhog` service (disposable
+  SMTP catcher, no real mail delivery — see note below).
 - `docker-compose.override.yml` — the test-shop stack (wordpress + wordpress-db),
   layered on automatically by `docker compose` when both files are present in
   the same directory. Kept separate because it's "test data infrastructure,"
@@ -65,6 +67,21 @@ everything else inbound is closed except 80/443.
 - `postgres-init/` — first-boot bootstrap SQL for the two Postgres containers
   (see §3).
 
+**Mailhog** (`mailhog/mailhog:latest`, proxied at `DOMAIN_MAIL`) is a
+disposable, non-delivering SMTP catcher, connected in Twenty as a plain
+IMAP/SMTP account (Settings → Accounts) purely so the completed-order email
+automation (category 6, see `PROGRESS.md`) has a real mailbox to send
+through and a web UI to visually confirm a send. Nothing sent through it
+ever leaves the Docker network. Getting this working also required disabling
+Twenty's outbound-SSRF guard for private IPs
+(`OUTBOUND_HTTP_SAFE_MODE_ENABLED=false` on `twenty-server`/`twenty-worker`) —
+safe here since there is no real external SMTP relay in this stack, but not a
+setting to carry into a deployment with genuine external mail credentials —
+and setting `LOGIC_FUNCTION_TYPE=LOCAL` on both, without which Twenty refuses
+to run *any* workflow Code step at all (defaults to disabled outside
+`NODE_ENV=development`). Both are commented in `docker-compose.yml` at their
+point of use.
+
 ## 2. Data flow `[STABLE — built and verified]`
 
 ```
@@ -73,7 +90,7 @@ WooCommerce order → status = Completed
         ▼
   WooCommerce webhook (topic: order.updated, HMAC secret = WC_WEBHOOK_SECRET)
         │  POST /woocommerce-orders   (path is lowercase — n8n webhook paths
-        │                              are case-sensitive; see §8)
+        │                              are case-sensitive; see §9)
         ▼
   n8n: Webhook  (raw body capture)
         ▼
@@ -97,22 +114,22 @@ WooCommerce order → status = Completed
         ▼
   n8n: IF "Already Synced?"
         │  true  → "Skip - Already Synced" (NoOp, dead end — this is the
-        │           duplicate-webhook-delivery guard, see §5)
+        │           duplicate-webhook-delivery guard, see §6)
         ▼ false
   n8n: Code "Create Line Items"   — per Woo line item: name/price/variation
         │                            SNAPSHOT as sold; skips if a line item
         │                            for this exact (order, product,
         │                            variation) already exists (finer-
-        │                            grained retry guard, see §5/§8)
+        │                            grained retry guard, see §6/§9)
         ▼
   n8n: Code "Set Sync Status Synced"  — updateOrder(syncStatus:
                                           STATUS_SYNCED), deliberately the
                                           last step — idempotent resume
-                                          marker (see §4, §5)
+                                          marker (see §4, §6)
 ```
 
 The exported, working workflow lives at [`n8n/workflow.json`](./n8n/workflow.json)
-("WooCommerce Order Sync", 10 nodes) — see §6 for how to import it.
+("WooCommerce Order Sync", 10 nodes) — see §7 for how to import it.
 
 **Verification performed** (all against live systems, re-queried via the
 Twenty API afterward, not just "the node ran green"): an isolated unit test of
@@ -191,11 +208,60 @@ the label.
   Unit Price / Line Total / Name are historical truth; the related Product
   record's Current Price is allowed to drift forward.
 - **Sync Status flips to `Synced` as the literal last write in the chain.**
-  This is what makes partial-failure retries safe (see §5) and is also the
+  This is what makes partial-failure retries safe (see §6) and is also the
   resume marker + what the completed-order email automation (category 6)
   triggers on.
 
-## 5. Duplicate prevention + retry approach `[STABLE — built and verified]`
+## 5. Twenty automations (ARR + completed-order email) `[STABLE — built and verified]`
+
+Two automations live entirely **inside Twenty** (its own workflow-builder
+feature, not n8n) and are only authorable via Twenty's UI — no metadata API
+covers step-level wiring (input variables, step-output references), confirmed
+by calling the real workflow-builder mutations directly rather than assuming.
+They are not separately exportable as a file the way the n8n workflow is;
+this section plus `PROGRESS.md`'s category 6 notes are the record of what was
+built and how it was verified.
+
+**A — ARR on Opportunity.** Trigger: Opportunity `amount` updated. Step: a
+Code (JS) action computing `arr = amount × 12`, then an Update Record step
+writing it back to the same Opportunity's `arr` field. Handles empty/zero
+`amount` (resolves to `arr = 0`, not an error). Verified it does **not**
+re-trigger itself: the workflow's own write to `arr` does not re-fire the
+`amount`-updated trigger, confirmed by polling `workflowRun` across several
+minutes around a real edit and seeing exactly one run per genuine `amount`
+change, not a cascade. Live test: Opportunity `amount` set to $10,000 →
+re-queried `arr = $120,000` exactly.
+
+**B — Order-synced email.** Trigger: `Order.syncStatus` transitions to
+`STATUS_SYNCED` (a `DATABASE_EVENT` trigger on `order.upserted`, filtered on
+that field — this is the same "flip Sync Status last" resume marker
+described in §2/§4, doing double duty as this automation's trigger). Steps:
+find the related Person (`Customer`) → find the order's Line Items → build an
+email subject/body summarizing the order (product names, quantities, prices,
+total) → send via a connected mailbox (Mailhog in this stack, see §1). Live
+test: a real order synced end-to-end through the full pipeline
+(WooCommerce → n8n → Twenty) produced exactly 1 email, correctly addressed
+and personalized, matching the order's real data.
+
+**Two known operational wrinkles, disclosed honestly (neither is a pipeline
+defect):**
+- The completed-order email's **HTML MIME part is cosmetically
+  double-escaped** — Mailhog's HTML view renders literal `&lt;h2&gt;` tag text
+  instead of a heading. The **plain-text part is correct** and fully
+  readable, and all data in both parts (customer, line items, total) is
+  accurate. Root cause not chased further since the plain-text part already
+  satisfies "the email fires with correct content"; flagged here rather than
+  hidden.
+- **WordPress's Action Scheduler queue (WP-Cron) is pseudo-cron**, not a real
+  timer — it only runs due jobs when something hits the site, so a
+  `completed`-order webhook can sit queued for longer than expected on a
+  quiet site. Observed once during demo Scenario 7 and resolved with
+  `wp cron event run action_scheduler_run_queue` (a legitimate "run what's
+  due now" nudge, not a fabricated trigger). A production deployment behind
+  real traffic, or an external cron hitting `wp-cron.php` on an interval,
+  would not see this; a from-scratch/demo instance might.
+
+## 6. Duplicate prevention + retry approach `[STABLE — built and verified]`
 
 Core principle: **upsert-everything, keyed by a stable natural identifier,
 nothing keyed by "did we already see this webhook."**
@@ -226,13 +292,14 @@ Signature verification (HMAC-SHA256, timing-safe compare) additionally
 ensures only genuine WooCommerce-originated requests reach the sync chain at
 all — see §2.
 
-## 6. Setup `[STABLE]`
+## 7. Setup `[STABLE]`
 
 1. Provision an Ubuntu server, open only 80/443/22 (22 restricted to your IP).
 2. `git clone` this repo, `cp .env.example .env`, fill in real values (see
    comments in `.env.example` for how to generate each secret).
-3. Point `DOMAIN_N8N` / `DOMAIN_TWENTY` / `DOMAIN_WP` at the server (sslip.io
-   needs no DNS setup — see §1).
+3. Point `DOMAIN_N8N` / `DOMAIN_TWENTY` / `DOMAIN_WP` (and, if you want the
+   completed-order email automation demoable, `DOMAIN_MAIL`) at the server
+   (sslip.io needs no DNS setup — see §1).
 4. `docker compose up -d` — brings up the full stack; Caddy will obtain
    HTTPS certs automatically on first request to each hostname.
 5. Complete first-run setup in Twenty (create the workspace, generate an API
@@ -257,22 +324,49 @@ all — see §2.
    version/project assignment), open the workflow in the n8n UI and flip the
    Active toggle by hand. Confirm it's live by checking Executions after the
    next real webhook delivery.
-8. Run `scripts/seed-orders.sh <admin-username>` to create test
+8. Build the two Twenty automations from §5 by hand in Settings → Workflows
+   (no API path exists for step-level wiring — see §5/§10 for why): the ARR
+   Code+Update-Record pair on Opportunity `amount`, and the order-synced-email
+   chain triggered on `Order.syncStatus → STATUS_SYNCED`. Connect a mailbox
+   (Settings → Accounts) for the email step to send through — Mailhog is
+   wired up in this stack for a real, non-delivering test mailbox with a web
+   UI at `DOMAIN_MAIL`.
+9. Run `scripts/seed-orders.sh <admin-username>` to create test
    customers/products/orders, or place orders manually through the
    WordPress/WooCommerce admin, then flip an order to **Completed** to
-   trigger a real sync. See §7 `[PENDING]` for the full demonstration
-   walkthrough once it's recorded.
+   trigger a real sync. See §8 for the full demonstration walkthrough.
 
-## 7. Demonstration scenarios `[PENDING — category 7, not started]`
+## 8. Demonstration scenarios `[7 of 7 EXECUTED — see demo-results.md]`
 
 The assignment requires demonstrating: new customer, returning customer,
-multi-product + add-ons order, a previously-purchased product in a new order,
-duplicate webhook delivery, a run that fails partway then succeeds on retry,
-and both Twenty automations firing. None of these have been recorded yet —
-this section will be replaced with the actual walkthrough (commands + expected
-Twenty state + screenshots/log excerpts) once categories 5–6 are done.
+multi-product + add-ons order, a previously-purchased product in a new order
+(with historical price preserved), duplicate webhook delivery, a run that
+fails partway then succeeds on retry, and both Twenty automations firing.
 
-## 8. Limitations & assumptions `[honest, current as of this build]`
+All 7 scenarios have been run for real against the live stack (real WP-CLI
+orders, real n8n executions, real Twenty GraphQL reads as evidence — not a dry
+run) and are fully documented, query-by-query, in
+[`demo-results.md`](./demo-results.md); the runbook used to drive them is in
+[`demo-script.md`](./demo-script.md). Summary:
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | New customer | New guest (Emma Writer) → 1 new Person, 1 Order, 1 Line Item |
+| 2 | Returning customer | Alice's 3rd order resolves to her existing Person id, not a new one |
+| 3 | Multi-product + variation + add-on | 1 order, 3 correctly-priced Line Items in a single sync |
+| 4 | Product reused + historical price preserved | Product's live price updated; two earlier orders' Line Item snapshots unchanged |
+| 5 | Duplicate webhook delivery | Identical signed payload replayed 3×; exactly 1 Order / 1 Line Item resulted, not 3 |
+| 6 | Fail partway, then retry | Simulated mid-chain crash (Person/Product/Order created, no Line Items) followed by a clean, non-duplicating retry through the real production workflow |
+| 7 | Both Twenty automations fire | **Executed.** ARR: Opportunity `amount` → $10,000, re-queried `arr` = $120,000 exactly, plus a 3-poll anti-loop check confirming the workflow's own write-back doesn't re-trigger it. Email: fresh order 38 (Nora Publisher) run end-to-end through the real pipeline produced exactly 1 correctly-addressed, correctly-personalized email in Mailhog. See §5 for what these automations do and two disclosed operational wrinkles hit along the way. |
+
+Scenarios 5 and 6 used two small helper scripts,
+[`scripts/demo-replay-webhook.sh`](./scripts/demo-replay-webhook.sh) (replays a
+real order's payload with a freshly-computed valid HMAC signature) and
+[`scripts/demo-retrigger-webhook.sh`](./scripts/demo-retrigger-webhook.sh)
+(forces a fresh natural `order.updated` webhook via a no-op order save) —
+both read secrets from `.env` at runtime and never hardcode or print them.
+
+## 9. Limitations & assumptions `[honest, current as of this build]`
 
 - **Paid add-ons are modeled as separate line items**, not WooCommerce's
   native product add-ons — WooCommerce core has no built-in paid add-on
@@ -299,7 +393,7 @@ Twenty state + screenshots/log excerpts) once categories 5–6 are done.
   Twenty's own supported API surface instead of writing SQL against it
   directly. This means recreating the object model on a fresh Twenty instance
   is either a manual UI step or a scripted replay of those API calls (both
-  documented, see §4/§6), not a single `docker compose up`.
+  documented, see §4/§7), not a single `docker compose up`.
 - **Order Line Item's "unique key"** is described in §4 as a composite
   (Order, Product, Variation) rather than a single dedicated field, because
   Twenty's custom objects don't enforce composite-unique constraints at the
@@ -307,7 +401,7 @@ Twenty state + screenshots/log excerpts) once categories 5–6 are done.
   for line items instead comes from the *Order*-level `Sync Status` gate (an
   order is only ever line-itemed once, since re-runs against an already-synced
   order skip line-item creation entirely, plus the finer-grained per-line-item
-  existence check described in §5) rather than a database constraint. Worth
+  existence check described in §6) rather than a database constraint. Worth
   knowing as a modeling trade-off, not a silent gap.
 - **The line-item dedup key is (Order, Product, Variation) — not WooCommerce's
   own internal `line_item.id`.** This is correct for this catalog: WooCommerce
@@ -318,11 +412,22 @@ Twenty state + screenshots/log excerpts) once categories 5–6 are done.
   (e.g. the same service booked twice for two different scheduled dates) — a
   real edge case this integration does not attempt to handle, disclosed here
   rather than silently assumed away.
-- **This README will keep changing** until categories 6–7 are complete — the
-  `[PENDING]` tags above are intentionally visible rather than pre-writing
-  content for work that hasn't happened yet.
+- **The completed-order email's HTML MIME part is cosmetically
+  double-escaped** (Mailhog's HTML view shows literal `&lt;h2&gt;` tag text
+  instead of a rendered heading). The plain-text part is correct and fully
+  readable, and all data in both parts is accurate — this is a rendering
+  quirk in how the HTML string is built/sent, not a data or dedup problem,
+  and was left as-is rather than chased further since the email's substance
+  (subject, recipient, order content) is already fully correct. See §5.
+- **WordPress's Action Scheduler queue (WP-Cron) is pseudo-cron**, not a real
+  timer — a `completed`-order webhook can sit queued longer than expected on
+  a quiet, low-traffic site until something happens to hit it (this test
+  instance needed a manual `wp cron event run action_scheduler_run_queue`
+  nudge once, during demo Scenario 7). Real traffic, or an external ticker
+  hitting `wp-cron.php` on an interval, avoids this in a production
+  deployment. See §5.
 
-## 9. AI tools used
+## 10. AI tools used
 
 See [`AI_TOOLS.md`](./AI_TOOLS.md) for a specific, honest account of which AI
 tooling was used for this project, what for, and how its output was verified

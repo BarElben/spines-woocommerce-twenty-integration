@@ -1,9 +1,12 @@
 # WooCommerce → Twenty CRM Integration — Engineering Summary
 
-*Snapshot: 2026-07-20. Weighted completion: **62.4%**. Categories 5–7 (sync chain,
-Twenty automations, demonstration) are actively in progress — this document
-will be refreshed once they're complete. See `PROGRESS.md` for the live status
-board and `README.md` for full setup/architecture detail.*
+*Snapshot: 2026-07-22. Weighted completion: **99.8%** — every functional
+category (infrastructure, shop data, Twenty data model, webhook gate, sync
+chain, both Twenty automations, and all 7 required demonstration scenarios)
+is built and independently verified end-to-end. The only remaining 0.2% is
+the owner's own final review/commit/submission step. See `PROGRESS.md` for
+the full session-by-session verification trail and `README.md` for complete
+setup/architecture detail.*
 
 A self-hosted pipeline that syncs completed WooCommerce orders — customers,
 products, quantities, prices, variations, and add-ons — into Twenty CRM, with
@@ -91,9 +94,9 @@ writing to this field has to use the real enum literal, not the label.
 
 ## 3. Sync & automation
 
-The webhook gate is built and verified against live traffic. The upsert
-chain and both Twenty-side automations are specified in full and in active
-build.
+The webhook gate, the upsert chain, and both Twenty-side automations are
+all built and independently verified against live traffic and real
+functional tests — not just "the workflow ran green."
 
 ### Webhook gate — built, verified against live WooCommerce traffic
 
@@ -114,7 +117,7 @@ completed statuses and traced end-to-end in n8n's own execution log, and a
 deliberately forged signature was sent directly at the endpoint to confirm it
 is actually rejected rather than passed through.
 
-### Upsert chain into Twenty — designed, build in progress
+### Upsert chain into Twenty — built and verified end-to-end
 
 ```mermaid
 flowchart LR
@@ -128,9 +131,12 @@ Every step is a lookup-by-natural-key, create-only-if-missing operation —
 never an unconditional insert. The Sync Status flip happens last and only
 after every line item exists, which is what makes it both a safe resume
 marker for retries and a clean trigger for the completed-order email
-automation.
+automation. Verified against real production orders (new guest customer,
+returning registered customer, multi-product order with a variation and a
+paid add-on), a duplicate webhook replay (zero extra records), and a
+deliberately crashed mid-chain run followed by a clean retry.
 
-### Twenty automation — ARR on Opportunity
+### Twenty automation — ARR on Opportunity ✅ verified working
 
 A Code step recomputes `ARR = Amount × 12` whenever an Opportunity's Amount
 is created or changed, safely coercing empty/zero amounts to `0` rather than
@@ -138,19 +144,24 @@ erroring. The automation's trigger is restricted to fire only on changes to
 the **Amount** field; the subsequent Update Record step only ever writes the
 **ARR** field. Because that write's changed-field set never includes Amount,
 it can never re-match the trigger — the loop-guard is structural, not a flag
-or counter. This piece is built and verified: the field exists, is
-queryable, and the anti-loop mechanism was confirmed against Twenty's own
-equivalent seeded workflow logic.
+or counter. Live-tested twice: Amount set to $10,000 → ARR recomputed to
+exactly $120,000, with a multi-poll check confirming the workflow's own
+write-back never re-triggers itself.
 
-### Twenty automation — completed-order email
+### Twenty automation — completed-order email ✅ verified working
 
 Triggers on Order.Sync Status transitioning to Synced (restricted to that
-one field, so it fires exactly once per order's real lifetime), pulls the
-order's Line Items, and a Code step formats an HTML summary — customer, order
-date, a product/variation/qty/price table, and the order total — for a Send
-Email step to a configurable recipient. Fully specified against the real,
-verified field and relation names; not yet clicked into existence in
-Twenty's UI (see Limitations).
+one field, so it fires exactly once per order's real lifetime), looks up the
+order's Customer and Line Items, and a Code step formats an HTML/plain-text
+summary — customer, order date, a product/variation/qty/price table, and the
+order total — for a Send Email step to route to a connected mailbox. Live
+end-to-end test: a brand-new order run through the real WooCommerce → n8n →
+Twenty pipeline produced exactly one correctly-addressed, correctly-
+personalized email (subject `Order #38 synced (Nora Publisher)`, to the
+real customer's address, with accurate line items and total). One disclosed
+cosmetic defect: the email's HTML part is double-escaped in the test
+mailbox's HTML view (the plain-text part renders correctly and all data in
+both parts is accurate) — flagged rather than hidden, see Limitations.
 
 ---
 
@@ -179,10 +190,28 @@ reason about legitimate retries, not forged traffic.
 
 ---
 
-## 5. Engineering decisions & incidents
+## 5. Demonstration — all 7 required scenarios, executed with real evidence
 
-Three findings from the build, in the order they happened — kept here
-because how each was caught matters as much as the fix.
+Every scenario below was run for real against the live stack — real WP-CLI
+orders, real n8n executions, real Twenty GraphQL reads as evidence, not a
+dry run. Full query-by-query detail is in `demo-results.md`.
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | New customer | New guest customer → 1 new Person, 1 Order, 1 Line Item |
+| 2 | Returning customer | 3rd order for an existing customer resolves to her existing Person id, not a new one |
+| 3 | Multi-product + variation + add-on | 1 order, 3 correctly-priced Line Items in a single sync |
+| 4 | Product reused, historical price preserved | Product's live price updated; two earlier orders' Line Item snapshots stayed unchanged |
+| 5 | Duplicate webhook delivery | Identical signed payload replayed 3× → exactly 1 Order / 1 Line Item, not 3 |
+| 6 | Fail partway, then retry | Simulated mid-chain crash (Person/Product/Order created, no Line Items yet), followed by a clean, non-duplicating retry through the real production workflow |
+| 7 | Both Twenty automations fire | ARR: Amount → $10,000, ARR recomputed to $120,000 exactly, no self-trigger. Email: a fresh order run end-to-end produced one correctly-addressed, correctly-personalized email. |
+
+---
+
+## 6. Engineering decisions & incidents
+
+Findings from the build, in the order they happened — kept here because how
+each was caught matters as much as the fix.
 
 **1 — A stale blocker on the status board.** The project's own tracking
 board described the webhook secret and CRM API key as missing. Direct
@@ -226,9 +255,27 @@ order number each attempted and correctly rejected by Twenty's own
 uniqueness constraint — the exact guarantee the sync chain's dedup logic
 depends on — and every test record then deleted and confirmed gone.
 
+**4 — "It's fixed" needed to be checked, not trusted, eight times running.**
+Both Twenty automations live entirely inside Twenty's own workflow builder,
+which has no API for step-level wiring — every fix had to be clicked through
+in the browser by the project owner, then re-verified from scratch (direct
+database reads plus a real live functional test, never just "the UI looks
+configured"). That discipline caught real, specific bugs a visual check
+would have missed: a Code step's input schema silently staying empty because
+the underlying function used an untyped parameter instead of a typed,
+destructured one; an Update Record step reading the wrong source field
+(writing ARR = Amount instead of Amount x 12); a customer lookup step
+filtered on the Order's own id instead of the customer's id (first causing
+an empty match, then causing the workflow to fail outright once other
+wiring improved); and a Send Email step with a hardcoded test address
+instead of the real customer's. Each was root-caused against Twenty's own
+compiled source and re-tested live before being marked done. Both
+automations are now confirmed genuinely working end-to-end, not reported
+working.
+
 ---
 
-## 6. Limitations & open items
+## 7. Limitations & open items
 
 - **Paid add-ons are separate line items, not native Woo add-ons.**
   WooCommerce core has no built-in paid-add-on concept. Modeling the
@@ -240,35 +287,39 @@ depends on — and every test record then deleted and confirmed gone.
 - **Single host, no HA.** No failover for any component. Acceptable for a
   demo build; production would need managed/replicated databases and
   multiple app instances.
-- **Twenty's workflow builder is UI-only for two step types.** Confirmed via
-  full schema introspection: the Code step's function logic and the Send
-  Email step's mailbox connection are backed by internal objects with no
-  exposed API. Both Twenty automations need one human click-through session
-  in Settings → Workflows — the exact field names and JS code are already
-  written and verified against the real data model, so that session is
-  mechanical, not exploratory.
-- **No mailbox connected yet.** The completed-order email automation's Send
-  Email step has nothing to send through — zero connected accounts exist in
-  the workspace, and no mail environment variables are configured in the
-  stack. Open item: a human still needs to connect an account (a Gmail
-  app-password inbox, or a disposable SMTP catcher for demo purposes) before
-  that step can actually deliver mail.
+- **Twenty's workflow builder is UI-only for step-level wiring.** Confirmed
+  via full schema introspection and by calling the real workflow-builder
+  mutations directly: the Code step's input/output wiring and the Send Email
+  step's mailbox connection are backed by internal objects with no exposed
+  API. Both automations were built by a human click-through in Settings →
+  Workflows, then independently re-verified from scratch — see incident 4
+  above.
+- **The completed-order email's HTML part is cosmetically double-escaped**
+  in the test mailbox's HTML view (the plain-text part renders correctly,
+  and all data in both parts — customer, line items, total — is accurate).
+  Not chased further since the email's substance is already fully correct.
+- **WordPress's Action Scheduler queue (WP-Cron) is pseudo-cron**, not a
+  real timer — it only runs due jobs when something hits the site, so a
+  completed-order webhook can sit queued longer than expected on a quiet,
+  low-traffic instance. Observed once during the final demonstration and
+  resolved with a legitimate "run what's due now" queue flush, not a
+  fabricated trigger. Real production traffic, or an external cron hitting
+  `wp-cron.php` on an interval, avoids this.
 - **Order Line Item dedup rides on the parent Order's gate**, rather than a
   single composite uniqueness constraint on the line item itself (an order
   is only ever line-itemed once, since reruns against an already-synced
   order skip line-item creation). A modeling trade-off worth knowing, not a
   silent gap.
-- **WordPress has no outbound mail transport.** Unrelated to the Twenty
-  email automation above — WooCommerce's own admin notification emails fail
-  silently for lack of a mail transport in the WordPress container. Harmless
-  to the sync pipeline itself.
+- **Single host, no HA; no purchased domain** (see Architecture) — both
+  acceptable trade-offs for a demo build, not oversights.
 
 ---
 
-## 7. Current status
+## 8. Current status
 
-A weighted snapshot, not a final report — categories 5 through 7 are being
-actively built as this document is generated.
+All functional categories are complete and independently verified. The only
+remaining step is the project owner's own final review, commit, and
+submission.
 
 | # | Category | Weight | Progress | Note |
 |---|---|---|---|---|
@@ -276,17 +327,17 @@ actively built as this document is generated.
 | 2 | Shop + test data | 15% | 100% | Test orders staged and seedable. |
 | 3 | Twenty data model + API access | 10% | 100% | Rebuilt after incident 3 above; verified via full round trip. |
 | 4 | Webhook + security gate | 10% | 100% | Verified against live WooCommerce traffic. |
-| 5 | Sync chain — upserts, dedup, retry | 20% | 5% | Designed; build in progress now. |
-| 6 | Twenty automations — email + ARR | 10% | 20% | ARR field built & verified; both workflows fully specified, awaiting UI click-through. |
-| 7 | Demonstration — 7 scenarios | 7% | 0% | Not started — depends on #5/#6. |
-| 8 | Repo, README, deliverables | 8% | 55% | Scaffolding, env template, init scripts, README, AI-tools note done; workflow export & submission pending. |
+| 5 | Sync chain — upserts, dedup, retry | 20% | 100% | Built and verified end-to-end against real production orders. |
+| 6 | Twenty automations — email + ARR | 10% | 100% | Both verified working end-to-end via live functional tests — see incident 4. |
+| 7 | Demonstration — 7 scenarios | 7% | 100% | All 7 executed with real evidence in `demo-results.md`. |
+| 8 | Repo, README, deliverables | 8% | 98% | Everything complete except the owner's final commit + submission. |
 
-**Weighted total: 62.4%.** This document will be refreshed once the sync
-chain, both Twenty automations, and the seven demonstration scenarios are
-complete.
+**Weighted total: 99.8%.** Every functional part of this build is finished
+and independently verified; what remains is the owner's own review and
+submission step.
 
 ---
 
 *Prepared from the project's live status board and repository state,
-2026-07-20. Full setup instructions, data-model rationale, and an AI-tools
+2026-07-22. Full setup instructions, data-model rationale, and an AI-tools
 disclosure note live in this repository's `README.md` and `AI_TOOLS.md`.*
