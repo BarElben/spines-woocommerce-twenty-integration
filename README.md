@@ -1,6 +1,6 @@
 # Spines — WooCommerce → Twenty CRM Integration
 
-Tech Lead hiring assignment for Spines. When a WooCommerce order reaches
+An engineering project for Spines. When a WooCommerce order reaches
 **Completed**, a webhook fires to a self-hosted **n8n** workflow, which syncs the
 customer, order, products, quantities, prices, variations, and add-ons into a
 self-hosted **Twenty CRM** — with duplicate-safe upserts and retry handling.
@@ -378,7 +378,7 @@ both read secrets from `.env` at runtime and never hardcode or print them.
   tied to the server's IP. If the Elastic IP ever changes, every `DOMAIN_*`
   value and the WooCommerce webhook delivery URL must be updated together.
 - **Single-host deployment** — no HA/failover for any component (Postgres,
-  n8n, Twenty, WordPress). Acceptable for a hiring-assignment demo; would need
+  n8n, Twenty, WordPress). Acceptable for a demo build; would need
   managed/replicated databases and multiple app instances for production.
 - **No outbound mail transport configured** in the stack, so WordPress's own
   transactional emails (e.g. "order updated" notification to the shop admin)

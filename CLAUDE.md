@@ -1,7 +1,7 @@
-# Spines Home Assignment — WooCommerce → Twenty CRM Integration
+# Spines — WooCommerce → Twenty CRM Integration
 
 ## Mission
-Tech Lead hiring assignment for Spines (book publishing platform). Build and deploy:
+Engineering project for Spines (book publishing platform). Build and deploy:
 WooCommerce order reaches Completed → webhook → n8n workflow → sync customer,
 order, products, quantities, prices, variations, add-ons into self-hosted Twenty CRM.
 Deliverables: git repo (compose + proxy config, .env.example, exported n8n workflow,

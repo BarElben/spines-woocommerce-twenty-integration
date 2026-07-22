@@ -1,4 +1,4 @@
-# Home Assignment – Tech Lead (Spines)
+# Project Brief — WooCommerce → Twenty CRM Integration (Spines)
 
 Objective: whenever a WooCommerce order reaches Completed, an n8n workflow syncs
 the customer, order, products, quantities, prices, variations, and add-ons into
