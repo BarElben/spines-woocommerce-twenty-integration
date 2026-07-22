@@ -6,7 +6,7 @@ WooCommerce order reaches Completed → webhook → n8n workflow → sync custom
 order, products, quantities, prices, variations, add-ons into self-hosted Twenty CRM.
 Deliverables: git repo (compose + proxy config, .env.example, exported n8n workflow,
 postgres init scripts, README with architecture/data model/dedup+retry approach/
-limitations). Submit to nir@spines.com.
+limitations). 
 
 ## Infrastructure (DONE)
 - AWS EC2 t3.medium, Ubuntu 24.04, eu-central-1, Elastic IP 63.181.247.69
@@ -42,11 +42,10 @@ Design rules: upsert-everything (lookup by unique key, create only if missing) m
 retries safe; snapshot on line items preserves history; Sync Status flips to synced
 as the LAST workflow step (idempotent email trigger + resume marker).
 
-## n8n workflow "WooCommerce Order Sync" (webhook gate VERIFIED 2026-07-20; sync chain NOT BUILT YET)
+## n8n workflow "WooCommerce Order Sync" (webhook gate VERIFIED 2026-07-20;)
 Webhook (POST /woocommerce-orders, Raw Body ON) → Code "Verify Signature"
 (HMAC-SHA256 of raw body vs x-wc-webhook-signature, timing-safe compare, handles
-webhook_id= ping) → IF "Only Completed" (status == completed) → [sync chain NOT
-BUILT YET].
+webhook_id= ping) → IF "Only Completed" (status == completed) 
 WooCommerce webhook: topic order.updated, created via WP CLI, delivery to production
 URL, secret = WC_WEBHOOK_SECRET.
 
